@@ -1,0 +1,476 @@
+theory spdm
+begin
+
+builtins: diffie-hellman, signing, asymmetric-encryption, symmetric-encryption, hashing
+functions: hmac/2, hkdf/1, true/0 , h/1
+predicates: NotEqual(x, y) <=> not(x = y)
+
+restriction equality:
+    "All x y #i. Eq(x, y) @ i ==> x = y"
+
+// restriction inequality:
+//     "All x y #i. Neq(x, y) @ i ==> not(x = y)"
+
+//Note: Details of all the rules and lemmas are mentioned in the documentation
+
+
+rule CreateRole:
+[ 
+                    
+]
+--[ Device_ID($ID)
+ ]->
+[ 
+    !Device($ID, 'Protocol_Version1_2'),  
+    Out($ID)               
+]
+
+rule Generate_key_pair:
+  [ Fr(~x) ]
+--[
+    Key($ID,~x)
+]->
+[
+    !Pk($ID,pk(~x))
+  , Out(pk(~x))
+  , !Ltk($ID,~x) 
+]
+
+rule Pairing:
+ [ 
+  !Ltk($A, ~x), !Ltk($B, ~y),
+  !Device($A_Dev_ID, 'Protocol_Version1_2'),
+  !Device($B_Dev_ID, 'Protocol_Version1_2')
+     
+ ]
+ --[ Pair($A, ~x, $B, ~y) , _restrict(NotEqual($A, $B)) 
+
+]->
+[ Alice0( $A, $A_Dev_ID, ~x, pk(~x), $B, $B_Dev_ID, pk(~y)), 
+    
+  Bob0($B, $B_Dev_ID, ~y, pk(~y), $A,$A_Dev_ID, pk(~x))  
+]
+
+///(1) Certificate Authority ///
+//CA's own key pair generation
+rule Certificate_Authority:
+
+let 
+    CA_pub = pk(~CA_sk)
+  in
+[ 
+    Fr(~CA_sk) 
+] 
+
+--[ CA_Key_Generated(CA_pub ) ]-> 
+
+[   !CA_SecretKey(~CA_sk),
+    !CA_PublicKey(CA_pub),
+    Out(CA_pub) 
+]
+
+rule IssueCertificate:
+let
+Certificate = sign(<$Device_ID, pkx>, ~CA_sk)    // Certificate signed by the CA's private key
+in
+[
+  !Pk($ID,pkx),
+  //!LTK(~DeviceID, ~ltk),
+  !Device($Device_ID, 'Protocol_Version1_2'),                             
+  !CA_SecretKey(~CA_sk)
+                           
+]
+--[ CertificateIssued($ID, pkx) ]-> 
+[
+   // !PK(~DeviceID, pk(~ltk)),
+    //!LTK(~DeviceID, ~ltk),
+    !Cert($Device_ID, pkx, Certificate),          
+    Out(<pkx,Certificate>)                      
+]
+
+///////////////////////////////////////////////////////
+////////////////////// VCA Phase /////////////////////
+//////////////////////////////////////////////////////
+//Initiator and Responder exchanging versions and certificates securely.
+
+
+rule VCA_Request_From_Alice:
+let 
+    Message_A = <'VCA_REQ', Cert_A, 'Protocol_Version1_2'>  
+
+
+in
+[  
+  Alice0( $A, $A_Dev_ID, ~x,pkA, $B, $B_Dev_ID, pkB),  
+
+  !Cert($A_Dev_ID,pkA, Cert_A),
+
+  Fr(~sID)              
+]
+--[ VCARequestSent(~sID, $A_Dev_ID, Cert_A)
+]->
+[ 
+    Out(Message_A),
+    Alice_State_1(~sID,$A, $A_Dev_ID, ~x, pkA, $B,$B_Dev_ID, pkB,'VCA_REQ','Protocol_Version1_2',Cert_A)
+
+]
+
+
+rule VCA_Response_From_Bob:
+let 
+Message_A = <'VCA_REQ', Cert_A, 'Protocol_Version1_2'>
+
+Response_Message = <'VCA_RSP', Cert_B,'Protocol_Version1_2'>
+Signed_Response_Message = sign(Response_Message, ~y)
+Encrypted_Response = senc(Signed_Response_Message, pkA)
+
+
+in
+
+[ 
+
+  Bob0($B, $B_Dev_ID, ~y, pkB, $A,$A_Dev_ID, pkA),
+    In(Message_A),                                         
+    !Cert($B_Dev_ID, pkB, Cert_B),
+    Fr(~sID)                
+]
+--[ VCAResponseSent(~sID,$B_Dev_ID, pkB)
+ ]->
+[ 
+    Out(Encrypted_Response),
+    Bob_State_1(~sID,$B, $B_Dev_ID, ~y, pkB, $A,$A_Dev_ID, pkA, Cert_B,'VCA_REQ', 'Protocol_Version1_2', Cert_A, 'VCA_RSP' )
+
+]
+
+
+rule VCA_Response_Processed_By_Alice:
+
+let
+Decrypted_Response = sdec(Encrypted_Response, ~x)
+Response_Message = fst(Decrypted_Response)
+Signature_B = snd(Decrypted_Response)
+Cert_B = snd(Response_Message)
+
+in
+[
+  Alice_State_1(~sID,$A, $A_Dev_ID, ~x, pkA, $B,$B_Dev_ID, pkB,'VCA_REQ','Protocol_Version1_2',Cert_A),
+  In(Encrypted_Response)
+]
+--[ VCAResponseProcessed(~sID, $A_Dev_ID, $B_Dev_ID)  ,
+  Eq(verify(Signature_B, Response_Message, pkB), true)  
+]->
+
+[
+    Alice_State_2(~sID,$A, $A_Dev_ID, ~x, pkA, $B,$B_Dev_ID, pkB,'VCA_REQ','Protocol_Version1_2',Cert_A,
+    'VCA_RSP', Cert_B)
+]
+
+
+// ///////////////////////////////////////////////////////
+// ////////////////////// Measurements ////////////////////
+// //////////////////////////////////////////////////////
+//representing internal states, such as software versions.
+
+rule Get_Measurements_Request_by_Alice:
+
+let   Measurement_A = <'GET_MEASUREMENTS ','MEASUREMENT_A'>
+in
+[
+    
+]
+--[ GetMeasurementsRequestByAlice(Measurement_A) ]->
+[
+    Out( Measurement_A) ,
+    Alices_Measurement(Measurement_A)
+
+]
+
+
+rule Send_Measurements_Response_by_Bob:
+let
+Measurement_B = <'MEASUREMENT_B'> 
+in
+[
+    In( <'MEASUREMENT_A'>)                                      
+]
+--[ MeasurementsSentByBob(Measurement_B) ]->
+[
+    Out(Measurement_B)  
+]
+
+
+rule Process_Measurements_At_Alice:
+[
+    In(<'MEASUREMENT_B'>),    
+    Alices_Measurement(Measurement_A)                                 
+]
+--[ ProcessedMeasurementsByAlice('MEASUREMENT_A','MEASUREMENT_B') ]->
+[
+    KnowsMeasurement('MEASUREMENT_A', 'MEASUREMENT_B') 
+
+]
+
+
+// // // // ///////////////////////////////////////////////////////
+// // // // ///////////////////KEY EXCHANGE////////////////////////
+// // // // //////////////////////////////////////////////////////
+//generates her Diffie-Hellman public key and Nonce
+
+
+rule Alice_KE_Request :
+let
+    ga = 'g'^~m  
+                        
+    Message_Alice = <'KEY_EXCHANGE', ga, ~Nonce_A>   
+in
+[
+  Alice_State_2(~sID,$A, $A_Dev_ID, ~x, pkA, $B,$B_Dev_ID, pkB,'VCA_REQ','Protocol_Version1_2',Cert_A,'VCA_RSP', Cert_B),
+
+    Fr(~m),                                            
+    Fr(~Nonce_A)                                       
+]
+--[ KeyExchangeRequestSent(~sID,$A_Dev_ID,$B_Dev_ID),
+    DH_Generated_A(~sID, pkA)
+  ]->
+[
+    Out(Message_Alice),                                
+    Alice_State_3(~sID,$A, $A_Dev_ID, ~x, pkA, $B,$B_Dev_ID, pkB,'VCA_REQ','Protocol_Version1_2',Cert_A,'VCA_RSP', Cert_B, ~m, 'KEY_EXCHANGE',ga, ~Nonce_A )
+]
+
+
+//Bob generates his own Diffie-Hellman public key and Nonce and calculates DH_Output
+rule Bob_Key_Exchange_Response :
+let
+    Message_Alice = <'KEY_EXCHANGE',ga, ~Nonce_A>
+    DH_Output = ga^~n  //(('g'~m)^~n)                  
+
+    VCA= <'VCA_REQ', 'Protocol_Version1_2', pkA, Cert_A,'VCA_RSP', pkB, Cert_B>
+    gb = 'g'^~n      
+    Key_Exchange_Transcript1 = <VCA, h(Cert_B), 'KEY_EXCHANGE', ga, ~Nonce_A,'KEY_EXCHANGE_RSP', gb, ~Nonce_B>
+
+    Signature_Bob = sign(h(Key_Exchange_Transcript1), ~y)  
+
+    HMAC_Key_Init1 = hkdf(<DH_Output, Key_Exchange_Transcript1, 'finished init'>) 
+    HMAC_Key_Resp1 = hkdf(<DH_Output, Key_Exchange_Transcript1,'finished resp'>)  
+    HMAC_Resp1 = hmac(Key_Exchange_Transcript1, HMAC_Key_Resp1)  
+
+    Message_Bob= <'KEY_EXCHANGE_RSP', gb, ~Nonce_B, Signature_Bob, HMAC_Resp1>
+in
+[
+  Bob_State_1(~sID,$B, $B_Dev_ID, ~y, pkB, $A,$A_Dev_ID, pkA, Cert_B,'VCA_REQ', 'Protocol_Version1_2', Cert_A, 'VCA_RSP' ),
+  In(Message_Alice),                  
+  Fr(~n),                                             
+  Fr(~Nonce_B)     
+]
+
+--[ KeyExchangeResponseSent(~sID,$B_Dev_ID,$A_Dev_ID),
+  DH_Generated_B(~sID,$B_Dev_ID, gb) ,
+  DH_Output_Bob(DH_Output),
+  Bob_Send(~sID,gb),
+  Share(~n) 
+
+
+  ]->
+[
+    Out(Message_Bob),
+    Bob_State_2(~sID,$B, $B_Dev_ID, ~y, pkB, $A,$A_Dev_ID, pkA, Cert_B,'VCA_REQ', 'Protocol_Version1_2', Cert_A, 'VCA_RSP',
+    ~n ,'KEY_EXCHANGE', ga, ~Nonce_A,'KEY_EXCHANGE_RSP', gb, ~Nonce_B, Signature_Bob, HMAC_Resp1, DH_Output  )
+
+]
+
+// Alice verifies Bob’s response to her key exchange request and calculates HMACs value
+rule Alice_Verify_Bob_And_Send_Finish :
+let
+    Message_Bob= <'KEY_EXCHANGE_RSP', gb, ~Nonce_B, Signature_Bob, HMAC_Resp1>
+    VCA= <'VCA_REQ', 'Protocol_Version1_2', pkA, Cert_A,'VCA_RSP', pkB, Cert_B>
+
+    DH_Output = gb^~m  //(('g'~n)^~m)                  
+
+    Key_Exchange_Transcript2= <VCA, h(Cert_B), 'KEY_EXCHANGE', ga, ~Nonce_A,'KEY_EXCHANGE_RSP', gb, ~Nonce_B, 'FINISH'> 
+
+    HMAC_Key_Resp2 = hkdf(<DH_Output, Key_Exchange_Transcript2, 'finished resp'>)  
+    HMAC_Key_Init2 = hkdf(<DH_Output, Key_Exchange_Transcript2, 'finished init'>)  
+    HMAC_Init1 = hmac(Key_Exchange_Transcript2, HMAC_Key_Init2)   
+
+    Key_Exchange_Transcript1=<VCA, h(Cert_B), 'KEY_EXCHANGE', ga, ~Nonce_A,'KEY_EXCHANGE_RSP', gb, ~Nonce_B>
+    Computed_HMAC_Key_Resp1 = hkdf(<DH_Output, Key_Exchange_Transcript1,'finished resp'>) 
+    Computed_HMAC_Resp1 = hmac(Key_Exchange_Transcript1, Computed_HMAC_Key_Resp1) 
+
+
+    Finish_Request = <'FINISH', HMAC_Init1>
+in
+
+[
+  Alice_State_3(~sID,$A, $A_Dev_ID, ~x, pkA, $B,$B_Dev_ID, pkB,'VCA_REQ','Protocol_Version1_2',Cert_A,'VCA_RSP', Cert_B, ~m, 'KEY_EXCHANGE',ga, ~Nonce_A ),
+
+    In(Message_Bob)
+]
+--[                         
+    // Verify Bob's signature
+    Eq(verify(Signature_Bob, h(Key_Exchange_Transcript1), pkB), true ),
+    Eq(HMAC_Resp1, Computed_HMAC_Resp1),
+    Alice_Calculates(~sID,$A_Dev_ID, HMAC_Init1)  ,
+    Alice_Check(~sID,$A_Dev_ID )
+
+]->
+[
+    Out(Finish_Request),
+    Alice_State_4(~sID,$A, $A_Dev_ID, ~x, pkA, $B,$B_Dev_ID, pkB,'VCA_REQ','Protocol_Version1_2',Cert_A,'VCA_RSP', Cert_B, ~m, 'KEY_EXCHANGE',ga, ~Nonce_A,
+    'KEY_EXCHANGE_RSP', gb, ~Nonce_B, Signature_Bob, HMAC_Resp1,'FINISH', HMAC_Init1, DH_Output )
+ ]
+
+
+//Bob verifies Alice’s FINISH message, checks the integrity of the communication using HMAC, 
+//and then derives the final session key for secure communication.
+rule Bob_Verifies_Finish_And_Prepares_Session_Key:
+let
+   VCA= <'VCA_REQ', 'Protocol_Version1_2', pkA, Cert_A,'VCA_RSP', pkB, Cert_B>
+    Key_Exchange_Transcript1 = <VCA, h(Cert_B), 'KEY_EXCHANGE', ga, ~Nonce_A, 'KEY_EXCHANGE_RSP', gb, ~Nonce_B>
+    Key_Exchange_Transcript2= <VCA, h(Cert_B), 'KEY_EXCHANGE', ga, ~Nonce_A,'KEY_EXCHANGE_RSP', gb, ~Nonce_B, 'FINISH'> 
+    Key_Exchange_Transcript3 = <VCA, h(Cert_B), 'KEY_EXCHANGE', ga, ~Nonce_A,'KEY_EXCHANGE_RSP', gb, ~Nonce_B, 'FINISH','FINISH_RSP'>
+
+    HMAC_Key_Resp3 = hkdf(<DH_Output, Key_Exchange_Transcript3, 'finished resp'>)  // Responder's Finished Key on updated transcript
+    HMAC_Key_Init3 = hkdf(<DH_Output, Key_Exchange_Transcript3, 'finished init'>)
+
+
+    Computed_HMAC_Key_Init2=hkdf(<DH_Output, Key_Exchange_Transcript2,'finished resp'>)
+    Computed_HMAC_Init1 = hmac(Key_Exchange_Transcript2, Computed_HMAC_Key_Init2) 
+
+    HMAC_Resp2 = hmac(Key_Exchange_Transcript3, HMAC_Key_Resp3)                 
+    Session_Key = hkdf(<DH_Output, Key_Exchange_Transcript3, 'sessionkey'>)    
+
+    Finish_RSP_Message = <'FINISH_RSP',  HMAC_Resp2>
+in
+[
+    Bob_State_2(~sID,$B, $B_Dev_ID, ~y, pkB, $A,$A_Dev_ID, pkA, Cert_B,'VCA_REQ', 'Protocol_Version1_2', Cert_A, 'VCA_RSP',
+    ~n ,'KEY_EXCHANGE', ga, ~Nonce_A,'KEY_EXCHANGE_RSP', gb, ~Nonce_B, Signature_Bob, HMAC_Resp1, DH_Output  ),
+  
+
+    In(<'FINISH', HMAC_Init1>)
+]
+--[
+    // Verify Alice's FINISH HMAC
+    Eq(HMAC_Init1, Computed_HMAC_Init1),  
+    SessionKeyDerived(Session_Key),
+    Bob_Check(~sID,$B_Dev_ID )
+
+]-> 
+[
+      Out(Finish_RSP_Message)
+]
+
+//Alice verifies the integrity of Bob’s final response message and derives the session key
+rule Alice_Verifies_Finish_RSP_And_Derives_Session_Key:
+let
+    Finish_RSP_Message = <'FINISH_RSP',  HMAC_Resp2>
+    VCA= <'VCA_REQ', 'Protocol_Version1_2', pkA, Cert_A,'VCA_RSP', pkB, Cert_B>
+    Key_Exchange_Transcript1 = <VCA, h(Cert_B), 'KEY_EXCHANGE', ga, ~Nonce_A, 'KEY_EXCHANGE_RSP', gb, ~Nonce_B>
+    Key_Exchange_Transcript2= <VCA, h(Cert_B), 'KEY_EXCHANGE', ga, ~Nonce_A,'KEY_EXCHANGE_RSP', gb, ~Nonce_B, 'FINISH'> 
+    Key_Exchange_Transcript3 = <VCA, h(Cert_B), 'KEY_EXCHANGE', ga, ~Nonce_A,'KEY_EXCHANGE_RSP', gb, ~Nonce_B, 'FINISH','FINISH_RSP'>
+
+    Computed_HMAC_Key_Resp3 = hkdf(<DH_Output, Key_Exchange_Transcript3, 'finished resp'>)
+    Computed_HMAC_Resp2 = hmac(Key_Exchange_Transcript3, Computed_HMAC_Key_Resp3)                 
+
+    Session_Key= hkdf(<DH_Output, Key_Exchange_Transcript3, 'sessionkey'>)    // Final Session Key on Final Transcipt
+in
+[
+  Alice_State_4(~sID,$A, $A_Dev_ID, ~x, pkA, $B,$B_Dev_ID, pkB,'VCA_REQ','Protocol_Version1_2',Cert_A,'VCA_RSP', Cert_B, ~m, 'KEY_EXCHANGE',ga, ~Nonce_A,
+    'KEY_EXCHANGE_RSP', gb, ~Nonce_B, Signature_Bob, HMAC_Resp1,'FINISH', HMAC_Init1, DH_Output ),
+    In(Finish_RSP_Message)
+
+]
+--[
+    // Verify Bob's HMAC_RSP
+    Eq(HMAC_Resp2, Computed_HMAC_Resp2),
+    SessionKeyDerived(Session_Key),
+    Alice_Commit_Again(~sID,HMAC_Resp2 )
+]->
+[
+    // Store the session key for Alice
+    !Session_Key_Alice(Session_Key)
+]
+
+
+lemma Talking_To_Yourself:
+ "
+ All A B x y #i. Pair(A,x,B,y)@#i ==> not(A=B)    
+ "
+
+
+lemma RolesForming_Exists:
+exists-trace
+"Ex #i #j ID x.
+Device_ID(ID)@ #i &
+Key(ID,x) @ #j 
+
+ "
+lemma Certificate_Generation:
+exists-trace
+"
+Ex #i CA_pub.
+CA_Key_Generated(CA_pub ) @i 
+"
+
+
+lemma Cert_Issued:
+exists-trace
+"
+Ex #j DeviceID Certificate .
+CertificateIssued(DeviceID, Certificate) @j
+"
+
+lemma Key_Exchange_Exists0[heuristic=I]:
+exists-trace
+"
+Ex #i #j #k sID1 sID2 B  gb  A .
+DH_Generated_A(sID1,A) @i &
+DH_Generated_B(sID2,B, gb) @j &
+Alice_Check(sID1,A ) @k 
+"
+
+lemma Key_Exchange_Exists1 [heuristic=c]:
+exists-trace
+"
+Ex #l sID2 B .
+Bob_Check(sID2,B) @l
+"
+
+
+lemma SecretKeys[heuristic=I]:
+"
+not(Ex k #i #j. SessionKeyDerived(k)@i & K(k)@j)
+"
+
+lemma SameKeys:
+"
+All k1 k2 #i #j. SessionKeyDerived(k1)@i & SessionKeyDerived(k2)@j ==> k1 = k2
+"
+
+
+lemma one_sided_authentication_Initiator_Fails[heuristic=I] :
+"
+All sID2 B pkB  #i .
+VCAResponseSent(sID2, B, pkB) @i
+==> (Ex #j sID1 A Cert_A . VCARequestSent(sID1, A, Cert_A) @j & j < i)
+"
+
+
+lemma one_sided_authentication_Responder_holds[heuristic=I]:
+"
+All sID1 A B #i .
+VCAResponseProcessed(sID1, A, B) @i
+==> (Ex #j sID2 pkB. VCAResponseSent(sID2,B, pkB) @j  & j < i)
+"
+
+
+
+
+
+
+
+
+
+
+
+
+end
